@@ -7,11 +7,6 @@ on:
         description: "GCP project ID (the string identifier, not the number)"
         required: true
         type: string
-      deploy_dir:
-        description: "Path to the deploy directory containing terraform/ and helm/ subdirectories"
-        required: false
-        type: string
-        default: "deploy"
       workload_identity_provider:
         description: "Full resource name of the GCP Workload Identity Provider for GitHub OIDC"
         required: true
@@ -20,11 +15,16 @@ on:
         description: "GCP service account email to impersonate via OIDC"
         required: true
         type: string
-      helm_release_name:
-        description: "Helm release name"
+      deploy_dir:
+        description: "Path to the deploy directory containing the Pulumi project"
         required: false
         type: string
-        default: "app"
+        default: "deploy"
+      pulumi_stack:
+        description: "Pulumi stack name"
+        required: false
+        type: string
+        default: "prod"
 
 jobs:
   deploy:
@@ -37,82 +37,72 @@ jobs:
       - name: Checkout caller repo
         uses: actions/checkout@v4
 
-      - name: Checkout blueprint repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ github.action_repository }}
-          ref: ${{ github.action_ref }}
-          path: .blueprint
-
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ inputs.workload_identity_provider }}
           service_account: ${{ inputs.service_account }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Setup Helm
-        uses: azure/setup-helm@v4
-
       - name: Resolve project number and bucket name
         id: project
         run: |
           PROJECT_NUMBER=$(gcloud projects describe "${{ inputs.gcp_project_id }}" --format='value(projectNumber)')
-          BUCKET_NAME="blueprint-tfstate-${PROJECT_NUMBER}"
+          BUCKET_NAME="blueprint-state-${PROJECT_NUMBER}"
           echo "number=${PROJECT_NUMBER}" >> "$GITHUB_OUTPUT"
           echo "bucket_name=${BUCKET_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Bootstrap Terraform state bucket
-        working-directory: .blueprint/modules/state-bucket
+      - name: Bootstrap state bucket
         run: |
-          terraform init
-          terraform apply -auto-approve \
-            -var="project_id=${{ inputs.gcp_project_id }}" \
-            2>&1 | tee /tmp/tf-bootstrap.log || {
-            if grep -q "googleapi: Error 409" /tmp/tf-bootstrap.log; then
-              echo "State bucket already exists, continuing."
-            else
+          gcloud storage buckets create "gs://${{ steps.project.outputs.bucket_name }}" \
+            --project="${{ inputs.gcp_project_id }}" \
+            --location=US \
+            --uniform-bucket-level-access \
+            2>&1 || true
+
+      - name: Install Pulumi CLI
+        uses: pulumi/actions@v6
+        with:
+          command: version
+
+      - name: Detect runtime and install dependencies
+        working-directory: ${{ inputs.deploy_dir }}
+        run: |
+          RUNTIME=$(python3 -c "import yaml, sys; print(yaml.safe_load(open('Pulumi.yaml'))['runtime'])")
+          echo "Detected Pulumi runtime: ${RUNTIME}"
+
+          case "${RUNTIME}" in
+            nodejs)
+              if [ -f package-lock.json ]; then
+                npm ci
+              elif [ -f yarn.lock ]; then
+                yarn install --frozen-lockfile
+              else
+                npm install
+              fi
+              ;;
+            python)
+              python3 -m venv venv
+              source venv/bin/activate
+              pip install -r requirements.txt
+              ;;
+            go)
+              go mod download
+              ;;
+            *)
+              echo "::error::Unsupported Pulumi runtime: ${RUNTIME}"
               exit 1
-            fi
-          }
+              ;;
+          esac
 
-      - name: Check expected Terraform outputs
-        working-directory: ${{ inputs.deploy_dir }}/terraform
-        run: |
-          if ! grep -rq 'output.*"gke_cluster_name"' . ; then
-            echo "::error::Missing required Terraform output: gke_cluster_name"
-            exit 1
-          fi
-          if ! grep -rq 'output.*"gke_cluster_location"' . ; then
-            echo "::error::Missing required Terraform output: gke_cluster_location"
-            exit 1
-          fi
+      - name: Pulumi login to GCS backend
+        run: pulumi login "gs://${{ steps.project.outputs.bucket_name }}"
 
-      - name: Terraform Init
-        working-directory: ${{ inputs.deploy_dir }}/terraform
-        run: |
-          terraform init \
-            -backend-config="bucket=${{ steps.project.outputs.bucket_name }}"
+      - name: Pulumi stack select
+        working-directory: ${{ inputs.deploy_dir }}
+        run: pulumi stack select --create "${{ inputs.pulumi_stack }}"
 
-      - name: Terraform Apply
-        working-directory: ${{ inputs.deploy_dir }}/terraform
-        run: terraform apply -auto-approve
-
-      - name: Configure kubectl from Terraform outputs
-        working-directory: ${{ inputs.deploy_dir }}/terraform
-        run: |
-          CLUSTER_NAME=$(terraform output -raw gke_cluster_name)
-          CLUSTER_LOCATION=$(terraform output -raw gke_cluster_location)
-          gcloud container clusters get-credentials "$CLUSTER_NAME" \
-            --location="$CLUSTER_LOCATION" \
-            --project="${{ inputs.gcp_project_id }}"
-
-      - name: Helm deploy
-        run: |
-          helm upgrade --install "${{ inputs.helm_release_name }}" \
-            "./${{ inputs.deploy_dir }}/helm" \
-            --wait
+      - name: Pulumi up
+        working-directory: ${{ inputs.deploy_dir }}
+        run: pulumi up --yes
+        env:
+          PULUMI_CONFIG_PASSPHRASE: ""

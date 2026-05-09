@@ -11,16 +11,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_wrapper: false
-
-      - name: Terraform validate (state-bucket module)
-        working-directory: modules/state-bucket
-        run: |
-          terraform init -backend=false
-          terraform validate
-
       - name: Check workflow YAML syntax
         run: python3 -c "import yaml, sys; yaml.safe_load(open(sys.argv[1]))" .github/workflows/deploy.yml
 

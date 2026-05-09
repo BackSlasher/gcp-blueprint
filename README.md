@@ -1,69 +1,32 @@
 # gcp-blueprint
 
-A reusable GitHub Actions workflow that deploys infrastructure and applications to GCP using Terraform + Helm. Point it at a GCP project and a directory — it handles state management, infrastructure provisioning, and app deployment.
+A reusable GitHub Actions workflow that deploys infrastructure and applications to GCP using Pulumi. Point it at a GCP project and a Pulumi program — it handles state management and runs `pulumi up`.
 
 ## What it does
 
-1. **Bootstraps Terraform state** — creates a GCS bucket (`blueprint-tfstate-{project_number}`) if it doesn't exist
-2. **Provisions infrastructure** — runs `terraform apply` against your Terraform config
-3. **Deploys your app** — reads GKE cluster info from Terraform outputs, then runs `helm upgrade --install`
-
-All authentication uses GitHub OIDC — no long-lived keys.
+1. **Authenticates to GCP** via GitHub OIDC — no long-lived keys
+2. **Bootstraps state storage** — creates a GCS bucket if it doesn't exist
+3. **Runs your Pulumi program** — provisions infrastructure and deploys your app in one step
 
 ## Prerequisites
 
-- A GCP project with the following APIs enabled:
-  - Kubernetes Engine API
-  - Cloud Storage API
-  - Cloud Resource Manager API
+- A GCP project with the APIs enabled for whatever you're deploying (GKE, Cloud Run, Artifact Registry, etc.)
 - [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines#github-actions) configured to trust your GitHub repo
-- A GCP service account with permissions to:
-  - Create/manage GCS buckets (for TF state)
-  - Apply your Terraform resources
-  - Access the target GKE cluster
+- A GCP service account with permissions to create GCS buckets (for state) and manage your target resources
 
 ## Repository layout
 
-Your calling repo should have this structure (path is configurable via `deploy_dir`, defaults to `deploy`):
+Your calling repo should have a Pulumi project in the deploy directory (configurable via `deploy_dir`, defaults to `deploy`):
 
 ```
 deploy/
-├── terraform/
-│   ├── main.tf          # your infrastructure — must use a gcs backend
-│   ├── variables.tf
-│   └── ...
-└── helm/
-    ├── Chart.yaml
-    ├── values.yaml
-    └── templates/
-        └── ...
+├── Pulumi.yaml
+├── package.json        # or requirements.txt, go.mod
+├── index.ts            # or __main__.py, main.go
+└── ...
 ```
 
-### Terraform requirements
-
-Your Terraform config **must**:
-
-1. Declare a `gcs` backend (the bucket is injected at init time):
-   ```hcl
-   terraform {
-     backend "gcs" {}
-   }
-   ```
-
-2. Define these two outputs — the workflow checks for them before running `apply`:
-   ```hcl
-   output "gke_cluster_name" {
-     value = google_container_cluster.main.name
-   }
-
-   output "gke_cluster_location" {
-     value = google_container_cluster.main.location
-   }
-   ```
-
-### Helm
-
-The `helm/` directory is passed directly to `helm upgrade --install`. It can be a chart with `Chart.yaml`, or any structure Helm accepts (including subchart references).
+The workflow detects the runtime from `Pulumi.yaml` and installs dependencies automatically. Supported runtimes: `nodejs`, `python`, `go`.
 
 ## Usage
 
@@ -84,8 +47,8 @@ jobs:
       gcp_project_id: my-gcp-project
       workload_identity_provider: projects/123456/locations/global/workloadIdentityPools/github/providers/github-actions
       service_account: deploy@my-gcp-project.iam.gserviceaccount.com
-      # deploy_dir: deploy          # optional, this is the default
-      # helm_release_name: app      # optional, this is the default
+      # deploy_dir: deploy        # optional, this is the default
+      # pulumi_stack: prod         # optional, this is the default
 ```
 
 ### Inputs
@@ -95,11 +58,79 @@ jobs:
 | `gcp_project_id` | yes | — | GCP project ID (the string, not the number) |
 | `workload_identity_provider` | yes | — | Full resource name of the Workload Identity Provider |
 | `service_account` | yes | — | GCP service account email for OIDC |
-| `deploy_dir` | no | `deploy` | Repo path containing `terraform/` and `helm/` |
-| `helm_release_name` | no | `app` | Name for the Helm release |
+| `deploy_dir` | no | `deploy` | Repo path containing the Pulumi project |
+| `pulumi_stack` | no | `prod` | Pulumi stack name |
 
 ## How state is managed
 
-The workflow automatically creates a GCS bucket named `blueprint-tfstate-{project_number}` in your project on the first run. Subsequent runs reuse it. The bucket has versioning enabled so you can recover from bad state.
+The workflow creates a GCS bucket named `blueprint-state-{project_number}` on the first run. Subsequent runs reuse it. Pulumi logs into this bucket as its state backend — no Pulumi Cloud account required.
 
-Your Terraform config should declare `backend "gcs" {}` with no bucket — the workflow injects the bucket name via `-backend-config` at init time.
+## Examples
+
+### GKE with Helm (TypeScript)
+
+Your Pulumi program can provision a GKE cluster, build and push a Docker image to Artifact Registry, and deploy via Helm — all in one `pulumi up`:
+
+```typescript
+import * as gcp from "@pulumi/gcp";
+import * as docker_build from "@pulumi/docker-build";
+import * as k8s from "@pulumi/kubernetes";
+
+// Artifact Registry repo
+const repo = new gcp.artifactregistry.Repository("repo", {
+    repositoryId: "my-app",
+    format: "DOCKER",
+    location: "us-central1",
+});
+
+// Build and push image
+const image = new docker_build.Image("app-image", {
+    context: { location: "../../" },  // repo root
+    tags: [pulumi.interpolate`${repo.location}-docker.pkg.dev/${gcp.config.project}/${repo.repositoryId}/app:latest`],
+    push: true,
+});
+
+// GKE cluster
+const cluster = new gcp.container.Cluster("cluster", {
+    location: "us-central1",
+    initialNodeCount: 1,
+});
+
+// Helm release using the built image
+const k8sProvider = new k8s.Provider("k8s", {
+    kubeconfig: cluster.endpoint.apply(/* ... */),
+});
+
+new k8s.helm.v3.Release("app", {
+    chart: "./helm",
+    values: { image: { repository: image.tags[0] } },
+}, { provider: k8sProvider });
+```
+
+### Cloud Run (TypeScript)
+
+```typescript
+import * as gcp from "@pulumi/gcp";
+import * as docker_build from "@pulumi/docker-build";
+
+const repo = new gcp.artifactregistry.Repository("repo", {
+    repositoryId: "my-app",
+    format: "DOCKER",
+    location: "us-central1",
+});
+
+const image = new docker_build.Image("app-image", {
+    context: { location: "../../" },
+    tags: [pulumi.interpolate`${repo.location}-docker.pkg.dev/${gcp.config.project}/${repo.repositoryId}/app:latest`],
+    push: true,
+});
+
+new gcp.cloudrunv2.Service("service", {
+    location: "us-central1",
+    template: {
+        containers: [{
+            image: image.ref,
+        }],
+    },
+});
+```
