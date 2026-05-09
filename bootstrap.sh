@@ -96,21 +96,17 @@ gcloud storage buckets create "gs://${BUCKET_NAME}" \
 
 # --- Output ---
 
-WIF_PROVIDER="projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/providers/${PROVIDER_ID}"
-
 echo ""
 echo "=== Done ==="
 echo ""
 echo "Set these as GitHub repository variables:"
 echo ""
-echo "  GCP_PROJECT_ID      = ${PROJECT_ID}"
-echo "  WIF_PROVIDER        = ${WIF_PROVIDER}"
-echo "  GCP_SERVICE_ACCOUNT = ${SA_EMAIL}"
+echo "  GCP_PROJECT_ID     = ${PROJECT_ID}"
+echo "  GCP_PROJECT_NUMBER = ${PROJECT_NUMBER}"
 echo ""
 echo "Then in your repo's .github/workflows/deploy.yml:"
 echo ""
 echo "  uses: BackSlasher/gcp-blueprint/.github/workflows/deploy.yml@main"
 echo "  with:"
 echo "    gcp_project_id: \${{ vars.GCP_PROJECT_ID }}"
-echo "    workload_identity_provider: \${{ vars.WIF_PROVIDER }}"
-echo "    service_account: \${{ vars.GCP_SERVICE_ACCOUNT }}"
+echo "    gcp_project_number: \${{ vars.GCP_PROJECT_NUMBER }}"

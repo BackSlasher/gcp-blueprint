@@ -21,11 +21,12 @@ Run the bootstrap script once per project. It creates the Workload Identity Fede
 ./bootstrap.sh my-project BackSlasher/my-app
 ```
 
-The script will output the three values you need for GitHub. Set them as [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables):
+The script will output the two values you need for GitHub. Set them as [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables):
 
 - `GCP_PROJECT_ID`
-- `WIF_PROVIDER`
-- `GCP_SERVICE_ACCOUNT`
+- `GCP_PROJECT_NUMBER`
+
+The WIF provider path and service account email are derived from conventions (pool: `github`, provider: `github-actions`, SA: `github-deploy@{project_id}...`).
 
 ### 2. Add a Pulumi project
 
@@ -57,8 +58,7 @@ jobs:
     uses: BackSlasher/gcp-blueprint/.github/workflows/deploy.yml@main
     with:
       gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
-      workload_identity_provider: ${{ vars.WIF_PROVIDER }}
-      service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      gcp_project_number: ${{ vars.GCP_PROJECT_NUMBER }}
       # deploy_dir: deploy        # optional, this is the default
       # pulumi_stack: prod         # optional, this is the default
 ```
@@ -80,11 +80,12 @@ The script is idempotent — safe to re-run.
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `gcp_project_id` | yes | — | GCP project ID (the string, not the number) |
-| `workload_identity_provider` | yes | — | Full resource name of the Workload Identity Provider |
-| `service_account` | yes | — | GCP service account email for OIDC |
+| `gcp_project_id` | yes | — | GCP project ID (the string, e.g. `my-project`) |
+| `gcp_project_number` | yes | — | GCP project number (numeric, e.g. `1234567890`) |
 | `deploy_dir` | no | `deploy` | Repo path containing the Pulumi project |
 | `pulumi_stack` | no | `prod` | Pulumi stack name |
+
+The workflow derives the WIF provider and service account from conventions set by `bootstrap.sh`.
 
 ## How state is managed
 
