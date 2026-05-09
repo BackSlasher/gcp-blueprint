@@ -8,15 +8,28 @@ A reusable GitHub Actions workflow that deploys infrastructure and applications 
 2. **Bootstraps state storage** — creates a GCS bucket if it doesn't exist
 3. **Runs your Pulumi program** — provisions infrastructure and deploys your app in one step
 
-## Prerequisites
+## Quick start
 
-- A GCP project with the APIs enabled for whatever you're deploying (GKE, Cloud Run, Artifact Registry, etc.)
-- [Workload Identity Federation](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines#github-actions) configured to trust your GitHub repo
-- A GCP service account with permissions to create GCS buckets (for state) and manage your target resources
+### 1. Bootstrap your GCP project
 
-## Repository layout
+Run the bootstrap script once per project. It creates the Workload Identity Federation setup, a deploy service account, and the state bucket:
 
-Your calling repo should have a Pulumi project in the deploy directory (configurable via `deploy_dir`, defaults to `deploy`):
+```bash
+./bootstrap.sh <gcp-project-id> <github-org/repo>
+
+# Example:
+./bootstrap.sh my-project BackSlasher/my-app
+```
+
+The script will output the three values you need for GitHub. Set them as [repository variables](https://docs.github.com/en/actions/learn-github-actions/variables):
+
+- `GCP_PROJECT_ID`
+- `WIF_PROVIDER`
+- `GCP_SERVICE_ACCOUNT`
+
+### 2. Add a Pulumi project
+
+Create a `deploy/` directory in your repo with a Pulumi project:
 
 ```
 deploy/
@@ -28,12 +41,11 @@ deploy/
 
 The workflow detects the runtime from `Pulumi.yaml` and installs dependencies automatically. Supported runtimes: `nodejs`, `python`, `go`.
 
-## Usage
+### 3. Add the workflow
 
-Create a workflow in your repo that calls this one:
+Create `.github/workflows/deploy.yml` in your repo:
 
 ```yaml
-# .github/workflows/deploy.yml
 name: Deploy
 
 on:
@@ -42,16 +54,29 @@ on:
 
 jobs:
   deploy:
-    uses: your-org/gcp-blueprint/.github/workflows/deploy.yml@main
+    uses: BackSlasher/gcp-blueprint/.github/workflows/deploy.yml@main
     with:
-      gcp_project_id: my-gcp-project
-      workload_identity_provider: projects/123456/locations/global/workloadIdentityPools/github/providers/github-actions
-      service_account: deploy@my-gcp-project.iam.gserviceaccount.com
+      gcp_project_id: ${{ vars.GCP_PROJECT_ID }}
+      workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+      service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
       # deploy_dir: deploy        # optional, this is the default
       # pulumi_stack: prod         # optional, this is the default
 ```
 
-### Inputs
+Push to `main` and the workflow will deploy.
+
+## What bootstrap.sh creates
+
+| Resource | Purpose |
+|---|---|
+| Workload Identity Pool (`github`) | Trusts GitHub Actions OIDC tokens |
+| OIDC Provider (`github-actions`) | Maps GitHub token claims, scoped to your repo |
+| Service account (`github-deploy@...`) | Identity used for deployments, granted `roles/editor` |
+| GCS bucket (`blueprint-state-{project_number}`) | Pulumi state backend |
+
+The script is idempotent — safe to re-run.
+
+## Inputs
 
 | Input | Required | Default | Description |
 |---|---|---|---|
@@ -63,49 +88,9 @@ jobs:
 
 ## How state is managed
 
-The workflow creates a GCS bucket named `blueprint-state-{project_number}` on the first run. Subsequent runs reuse it. Pulumi logs into this bucket as its state backend — no Pulumi Cloud account required.
+The workflow creates a GCS bucket named `blueprint-state-{project_number}` on the first run (also created by `bootstrap.sh`). Subsequent runs reuse it. Pulumi logs into this bucket as its state backend — no Pulumi Cloud account required.
 
 ## Examples
-
-### GKE with Helm (TypeScript)
-
-Your Pulumi program can provision a GKE cluster, build and push a Docker image to Artifact Registry, and deploy via Helm — all in one `pulumi up`:
-
-```typescript
-import * as gcp from "@pulumi/gcp";
-import * as docker_build from "@pulumi/docker-build";
-import * as k8s from "@pulumi/kubernetes";
-
-// Artifact Registry repo
-const repo = new gcp.artifactregistry.Repository("repo", {
-    repositoryId: "my-app",
-    format: "DOCKER",
-    location: "us-central1",
-});
-
-// Build and push image
-const image = new docker_build.Image("app-image", {
-    context: { location: "../../" },  // repo root
-    tags: [pulumi.interpolate`${repo.location}-docker.pkg.dev/${gcp.config.project}/${repo.repositoryId}/app:latest`],
-    push: true,
-});
-
-// GKE cluster
-const cluster = new gcp.container.Cluster("cluster", {
-    location: "us-central1",
-    initialNodeCount: 1,
-});
-
-// Helm release using the built image
-const k8sProvider = new k8s.Provider("k8s", {
-    kubeconfig: cluster.endpoint.apply(/* ... */),
-});
-
-new k8s.helm.v3.Release("app", {
-    chart: "./helm",
-    values: { image: { repository: image.tags[0] } },
-}, { provider: k8sProvider });
-```
 
 ### Cloud Run (TypeScript)
 
@@ -133,4 +118,38 @@ new gcp.cloudrunv2.Service("service", {
         }],
     },
 });
+```
+
+### GKE with Helm (TypeScript)
+
+```typescript
+import * as gcp from "@pulumi/gcp";
+import * as docker_build from "@pulumi/docker-build";
+import * as k8s from "@pulumi/kubernetes";
+
+const repo = new gcp.artifactregistry.Repository("repo", {
+    repositoryId: "my-app",
+    format: "DOCKER",
+    location: "us-central1",
+});
+
+const image = new docker_build.Image("app-image", {
+    context: { location: "../../" },
+    tags: [pulumi.interpolate`${repo.location}-docker.pkg.dev/${gcp.config.project}/${repo.repositoryId}/app:latest`],
+    push: true,
+});
+
+const cluster = new gcp.container.Cluster("cluster", {
+    location: "us-central1",
+    initialNodeCount: 1,
+});
+
+const k8sProvider = new k8s.Provider("k8s", {
+    kubeconfig: cluster.endpoint.apply(/* ... */),
+});
+
+new k8s.helm.v3.Release("app", {
+    chart: "./helm",
+    values: { image: { repository: image.tags[0] } },
+}, { provider: k8sProvider });
 ```

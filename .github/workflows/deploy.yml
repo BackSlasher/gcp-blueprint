@@ -43,21 +43,12 @@ jobs:
           workload_identity_provider: ${{ inputs.workload_identity_provider }}
           service_account: ${{ inputs.service_account }}
 
-      - name: Resolve project number and bucket name
+      - name: Resolve project number
         id: project
         run: |
           PROJECT_NUMBER=$(gcloud projects describe "${{ inputs.gcp_project_id }}" --format='value(projectNumber)')
-          BUCKET_NAME="blueprint-state-${PROJECT_NUMBER}"
           echo "number=${PROJECT_NUMBER}" >> "$GITHUB_OUTPUT"
-          echo "bucket_name=${BUCKET_NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Bootstrap state bucket
-        run: |
-          gcloud storage buckets create "gs://${{ steps.project.outputs.bucket_name }}" \
-            --project="${{ inputs.gcp_project_id }}" \
-            --location=US \
-            --uniform-bucket-level-access \
-            2>&1 || true
+          echo "bucket_name=blueprint-state-${PROJECT_NUMBER}" >> "$GITHUB_OUTPUT"
 
       - name: Install Pulumi CLI
         uses: pulumi/actions@v6
