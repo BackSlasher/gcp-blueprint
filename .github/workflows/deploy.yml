@@ -45,9 +45,7 @@ jobs:
           service_account: ${{ env.SERVICE_ACCOUNT }}
 
       - name: Install Pulumi CLI
-        uses: pulumi/actions@v6
-        with:
-          command: version
+        uses: pulumi/setup-pulumi@v2
 
       - name: Detect runtime and install dependencies
         working-directory: ${{ inputs.deploy_dir }}

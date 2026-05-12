@@ -53,6 +53,12 @@ on:
   push:
     branches: [main]
 
+# Required — caller must grant id-token: write, or the reusable workflow
+# fails at startup (it can't request more than the caller grants).
+permissions:
+  id-token: write
+  contents: read
+
 jobs:
   deploy:
     uses: BackSlasher/gcp-blueprint/.github/workflows/deploy.yml@main
